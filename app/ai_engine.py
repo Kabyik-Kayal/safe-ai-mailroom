@@ -399,12 +399,32 @@ async def decide_dossier_action(dossier: Dossier) -> Proposal:
     content_hash = sha256_hex(content_bytes)
     call_id = f"call_{content_hash[:24]}"
 
+    groq_key = os.environ.get("GROQ_API_KEY")
     gemini_key = os.environ.get("GEMINI_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
-    ai_provider = os.environ.get("AI_PROVIDER", "gemini" if gemini_key else ("openai" if openai_key else "fallback"))
+
+    ai_provider = os.environ.get("AI_PROVIDER")
+    if not ai_provider:
+        if groq_key:
+            ai_provider = "groq"
+        elif gemini_key:
+            ai_provider = "gemini"
+        elif openai_key:
+            ai_provider = "openai"
+        else:
+            ai_provider = "fallback"
 
     raw_json_str = None
-    if httpx and ai_provider == "gemini" and gemini_key:
+    if httpx and ai_provider == "groq" and groq_key:
+        model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+        base_url = "https://api.groq.com/openai/v1"
+        user_prompt = f"DOSSIER:\n{json.dumps(dossier_dict, indent=2)}"
+        try:
+            raw_json_str = await call_openai(user_prompt, groq_key, model, base_url)
+        except Exception as e:
+            logger.error(f"Groq call error: {e}")
+
+    elif httpx and ai_provider == "gemini" and gemini_key:
         model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
         user_prompt = f"{SYSTEM_PROMPT}\n\nDOSSIER:\n{json.dumps(dossier_dict, indent=2)}"
         try:

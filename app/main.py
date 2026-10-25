@@ -81,11 +81,14 @@ def health_check():
 @app.get("/status")
 def diagnostic_status():
     import os
+    groq_key = os.environ.get("GROQ_API_KEY", "")
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     return {
         "status": "ok",
         "ai_provider": os.environ.get("AI_PROVIDER", "unset"),
+        "groq_key_configured": bool(groq_key and len(groq_key) > 5),
+        "groq_model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
         "gemini_key_configured": bool(gemini_key and len(gemini_key) > 5),
         "gemini_model": os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
         "openai_key_configured": bool(openai_key and len(openai_key) > 5)
