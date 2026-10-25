@@ -252,8 +252,6 @@ async def decide_dossier_action(dossier: Dossier) -> Proposal:
     raw_json_str = None
     if httpx and ai_provider == "gemini" and gemini_key:
         model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-        if "2.5" in model:
-            model = "gemini-2.0-flash"
         user_prompt = f"{SYSTEM_PROMPT}\n\nDOSSIER:\n{json.dumps(dossier_dict, indent=2)}"
         try:
             raw_json_str = await call_gemini(user_prompt, gemini_key, model)
