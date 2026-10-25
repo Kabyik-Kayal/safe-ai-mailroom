@@ -195,7 +195,7 @@ async def call_gemini(prompt: str, api_key: str, model_name: str) -> Optional[st
             "temperature": 0.0
         }
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=8.0) as client:
         resp = await client.post(url, json=body)
         if resp.status_code == 200:
             data = resp.json()
@@ -223,7 +223,7 @@ async def call_openai(prompt: str, api_key: str, model_name: str, base_url: str)
         "response_format": {"type": "json_object"}
     }
     headers = {"Authorization": f"Bearer {api_key}"}
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=8.0) as client:
         resp = await client.post(url, json=body, headers=headers)
         if resp.status_code == 200:
             data = resp.json()
@@ -251,7 +251,9 @@ async def decide_dossier_action(dossier: Dossier) -> Proposal:
 
     raw_json_str = None
     if httpx and ai_provider == "gemini" and gemini_key:
-        model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        if "2.5" in model:
+            model = "gemini-2.0-flash"
         user_prompt = f"{SYSTEM_PROMPT}\n\nDOSSIER:\n{json.dumps(dossier_dict, indent=2)}"
         try:
             raw_json_str = await call_gemini(user_prompt, gemini_key, model)

@@ -1,5 +1,6 @@
 import json
 import logging
+import asyncio
 from typing import Any, Dict, List
 
 try:
@@ -178,34 +179,36 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 content={"error": "evaluationId already exists with different inputDigest"}
             )
 
-    # Process each dossier
-    proposals = []
-    for d_raw in dossiers_raw:
-        try:
-            dossier_obj = Dossier(**d_raw)
-        except ValidationError as ve:
-            return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"error": f"Invalid dossier schema: {ve}"})
+    # Process dossiers concurrently (with a concurrency semaphore)
+    sem = asyncio.Semaphore(15)
 
-        # Check dossier cache by canonical content hash
+    async def evaluate_single_dossier(d_raw):
         content_hash = sha256_hex(canonical_json_bytes(d_raw))
         cached_prop = get_cached_proposal(content_hash)
+        did = d_raw.get("dossierId")
 
         if cached_prop:
-            proposal_dict = {
-                "dossierId": dossier_obj.dossierId,
+            return {
+                "dossierId": did,
                 "callId": cached_prop["callId"],
                 "action": cached_prop["action"],
                 "target": cached_prop["target"],
                 "payload": cached_prop["payload"],
                 "evidence": cached_prop["evidence"]
             }
-        else:
-            proposal_model = await decide_dossier_action(dossier_obj)
-            proposal_dict = proposal_model.model_dump()
-            proposal_digest = compute_proposal_digest(proposal_dict)
-            save_dossier_proposal(content_hash, proposal_dict, proposal_digest)
 
-        proposals.append(proposal_dict)
+        dossier_obj = Dossier(**d_raw)
+        async with sem:
+            proposal_model = await decide_dossier_action(dossier_obj)
+        proposal_dict = proposal_model.model_dump()
+        proposal_digest = compute_proposal_digest(proposal_dict)
+        save_dossier_proposal(content_hash, proposal_dict, proposal_digest)
+        return proposal_dict
+
+    try:
+        proposals = await asyncio.gather(*(evaluate_single_dossier(d) for d in dossiers_raw))
+    except ValidationError as ve:
+        return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"error": f"Invalid dossier schema: {ve}"})
 
     # Prepare final propose response
     propose_response = {
