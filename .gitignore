@@ -1,0 +1,30 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Environment secrets
+.env
+.env.local
+
+# Databases & test files
+*.db
+*.sqlite
+*.sqlite3
+test_mailroom.db
+*.log
+
+# IDEs & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
