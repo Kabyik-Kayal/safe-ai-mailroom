@@ -155,32 +155,38 @@ try:
     from pydantic import BaseModel, model_validator
 
     class Line(BaseModel):
+        model_config = {"extra": "allow"}
         lineId: str
         text: str
 
     class Source(BaseModel):
-        sourceId: str
-        kind: str
-        provenance: str
-        title: str
-        lines: List[Line]
+        model_config = {"extra": "allow"}
+        sourceId: Optional[str] = None
+        artifactId: Optional[str] = None
+        kind: Optional[str] = None
+        provenance: Optional[str] = None
+        title: Optional[str] = ""
+        lines: List[Line] = []
 
     class Dossier(BaseModel):
+        model_config = {"extra": "allow"}
         dossierId: str
         partition: Literal["stable_core", "fresh_audit"]
-        receivedAt: str
-        mailbox: str
-        objective: str
-        sources: List[Source]
+        receivedAt: Optional[str] = None
+        mailbox: Optional[str] = "inbox"
+        objective: Optional[str] = ""
+        sources: List[Source] = []
 
         def all_line_ids(self) -> Set[str]:
             return {line.lineId for s in self.sources for line in s.lines}
 
     class Target(BaseModel):
+        model_config = {"extra": "allow"}
         kind: str
         id: str
 
     class Proposal(BaseModel):
+        model_config = {"extra": "allow"}
         dossierId: str
         callId: str
         action: str
