@@ -78,6 +78,20 @@ def health_check():
     return {"status": "ok", "service": "mailroom-agent"}
 
 
+@app.get("/status")
+def diagnostic_status():
+    import os
+    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    return {
+        "status": "ok",
+        "ai_provider": os.environ.get("AI_PROVIDER", "unset"),
+        "gemini_key_configured": bool(gemini_key and len(gemini_key) > 5),
+        "gemini_model": os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+        "openai_key_configured": bool(openai_key and len(openai_key) > 5)
+    }
+
+
 @app.post("/")
 @app.post("/mailroom")
 async def mailroom_gateway(request: Request):
@@ -163,12 +177,12 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
 
     # Compute inputDigest over canonical UTF-8 bytes of dossiers
     input_digest = compute_input_digest(dossiers_raw)
-    request_hash = sha256_hex(raw_body)
+    request_hash = sha256_hex(canonical_json_bytes(data))
 
     # Check for existing evaluationId (Replay vs Conflict)
     existing_eval = get_evaluation(eval_id)
     if existing_eval:
-        if existing_eval["input_digest"] == input_digest:
+        if existing_eval["request_hash"] == request_hash:
             # Exact replay: return cached response
             cached_resp = json.loads(existing_eval["propose_response_json"])
             return JSONResponse(status_code=status.HTTP_200_OK, content=cached_resp)
@@ -176,7 +190,7 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
             # Same evaluationId with changed content -> HTTP 409 Conflict
             return JSONResponse(
                 status_code=status.HTTP_409_CONFLICT,
-                content={"error": "evaluationId already exists with different inputDigest"}
+                content={"error": "evaluationId already exists with different request content"}
             )
 
     # Process dossiers concurrently (with a concurrency semaphore)
@@ -257,10 +271,18 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
             content={"error": f"inputDigest mismatch for evaluationId '{eval_id}'"}
         )
 
-    # Check for exact replay of commit
-    if eval_record["status"] == "completed" and eval_record["commit_response_json"]:
-        cached_commit = json.loads(eval_record["commit_response_json"])
-        return JSONResponse(status_code=status.HTTP_200_OK, content=cached_commit)
+    commit_req_hash = sha256_hex(canonical_json_bytes(data))
+
+    # Check for exact replay of commit vs conflict
+    if eval_record["status"] == "completed" and eval_record.get("commit_response_json"):
+        if eval_record.get("commit_request_hash") == commit_req_hash:
+            cached_commit = json.loads(eval_record["commit_response_json"])
+            return JSONResponse(status_code=status.HTTP_200_OK, content=cached_commit)
+        else:
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={"error": f"EvaluationId '{eval_id}' already completed with different commit payload"}
+            )
 
     # Load stored public key JWK
     try:
@@ -349,6 +371,6 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
     }
 
     # Persist terminal state
-    save_commit_evaluation(eval_id, commit_response)
+    save_commit_evaluation(eval_id, commit_req_hash, commit_response)
 
     return JSONResponse(status_code=status.HTTP_200_OK, content=commit_response)

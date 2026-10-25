@@ -28,10 +28,19 @@ def init_db():
                 proposals_json TEXT NOT NULL,
                 propose_response_json TEXT NOT NULL,
                 commit_response_json TEXT,
+                commit_request_hash TEXT,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
         """)
+        # Ensure column exists for migrations
+        cursor.execute("PRAGMA table_info(evaluations)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "commit_request_hash" not in columns:
+            try:
+                cursor.execute("ALTER TABLE evaluations ADD COLUMN commit_request_hash TEXT")
+            except Exception:
+                pass
 
         # 2. Dossier content-addressable cache
         cursor.execute("""
@@ -129,12 +138,12 @@ def save_propose_evaluation(
         conn.commit()
 
 
-def save_commit_evaluation(eval_id: str, commit_response: Dict[str, Any]):
+def save_commit_evaluation(eval_id: str, commit_request_hash: str, commit_response: Dict[str, Any]):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE evaluations
-            SET commit_response_json = ?, status = 'completed'
+            SET commit_response_json = ?, commit_request_hash = ?, status = 'completed'
             WHERE evaluation_id = ?
-        """, (json.dumps(commit_response), eval_id))
+        """, (json.dumps(commit_response), commit_request_hash, eval_id))
         conn.commit()
