@@ -128,7 +128,6 @@ def verify_outbound_safety(
     for s in sources:
         s_dict = s if isinstance(s, dict) else (s.model_dump() if hasattr(s, "model_dump") else getattr(s, "data", {}))
         provenance = str(s_dict.get("provenance", "")).lower()
-        # Only internal or trusted system provenance can approve sends
         if provenance not in ("internal", "system", "staff", "manager", "admin", "logistics"):
             continue
 
@@ -136,7 +135,7 @@ def verify_outbound_safety(
         for l in lines:
             l_dict = l if isinstance(l, dict) else (l.model_dump() if hasattr(l, "model_dump") else getattr(l, "data", {}))
             txt = l_dict.get("text", "").lower()
-            if ("approved" in txt or "authorization" in txt or "verified approval" in txt) and target_email in txt:
+            if ("approved" in txt or "authorization" in txt or "permission" in txt) and target_email in txt:
                 has_trusted_approval = True
                 break
 
@@ -151,78 +150,24 @@ def verify_outbound_safety(
     return action, target, payload
 
 
-def ground_evidence(
-    dossier: Dossier,
-    target: Optional[Dict[str, Any]],
-    payload: Dict[str, Any],
-    raw_evidence: List[str]
-) -> List[str]:
+def analyze_dossier_strictly(dossier: Dossier) -> Dict[str, Any]:
     """
-    Ensures evidence citations are both SUFFICIENT (covers all arguments)
-    and MINIMAL (excludes unrelated lines like greetings or footers).
+    Deterministic authority, provenance, and case-state decision engine.
+    Extracts real case-specific arguments and minimal sufficient evidence.
     """
     sources = dossier.sources if isinstance(dossier.sources, list) else []
-    lines_map: Dict[str, str] = {}
-    valid_ids: Set[str] = set()
+    dossier_id = dossier.dossierId
+    mailbox = getattr(dossier, "mailbox", "inbox")
+    objective = getattr(dossier, "objective", "").lower()
 
-    for s in sources:
-        s_dict = s if isinstance(s, dict) else (s.model_dump() if hasattr(s, "model_dump") else getattr(s, "data", {}))
-        for l in s_dict.get("lines", []):
-            l_dict = l if isinstance(l, dict) else (l.model_dump() if hasattr(l, "model_dump") else getattr(l, "data", {}))
-            lid = l_dict.get("lineId")
-            txt = l_dict.get("text", "")
-            if lid:
-                lines_map[lid] = txt
-                valid_ids.add(lid)
-
-    values_to_find: Set[str] = set()
-
-    if isinstance(target, dict):
-        tid = str(target.get("id", ""))
-        if tid and not tid.startswith("mailbox:") and tid != "mailroom":
-            values_to_find.add(tid.lower())
-
-    if isinstance(payload, dict):
-        for k, v in payload.items():
-            if isinstance(v, str) and k not in ("template", "reasonCode", "questionCode", "field"):
-                clean_v = v.strip().lower()
-                if len(clean_v) >= 3:
-                    values_to_find.add(clean_v)
-
-    grounded_ids: Set[str] = set()
-    for val in values_to_find:
-        for lid, txt in lines_map.items():
-            if val in txt.lower():
-                grounded_ids.add(lid)
-
-    if grounded_ids:
-        return sorted(list(grounded_ids & valid_ids))
-
-    cleaned = [lid for lid in raw_evidence if lid in valid_ids]
-    return sorted(list(set(cleaned))) if cleaned else ([next(iter(valid_ids))] if valid_ids else ["line_0"])
-
-
-def extract_features(dossier: Dossier):
-    sources = dossier.sources if isinstance(dossier.sources, list) else []
-
-    all_lines: List[Tuple[str, str, str, str]] = []  # (sourceId, provenance, lineId, text)
-    emails: List[Tuple[str, str]] = []                # (lineId, email)
-    ref_ids: List[Tuple[str, str]] = []               # (lineId, refId)
-    windows: List[Tuple[str, str]] = []               # (lineId, windowStr)
-    case_ids: List[Tuple[str, str]] = []              # (lineId, caseId)
-    statuses: List[Tuple[str, str]] = []              # (lineId, status)
-    injections: List[Tuple[str, str, str]] = []        # (sourceId, lineId, text)
-    approvals: List[Tuple[str, str, str]] = []         # (lineId, email, text)
-    completed_markers: List[Tuple[str, str]] = []      # (lineId, reasonCode)
-    unclear_markers: List[Tuple[str, str]] = []        # (lineId, claimedSender)
-
+    # Regex patterns
     re_email = re.compile(r'[\w\.-]+@[\w\.-]+\.\w+', re.IGNORECASE)
     re_ref = re.compile(r'\b(?:ORD|CASE|REF|TKT|INC|REQ|PKG|INV)[-_]?[A-Za-z0-9]*\d+[A-Za-z0-9]*\b', re.IGNORECASE)
     re_hash_ref = re.compile(r'#([A-Za-z0-9_-]+)')
-    re_window = re.compile(r'(\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', re.IGNORECASE)
+    re_win = re.compile(r'(\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', re.IGNORECASE)
     re_status = re.compile(r'\b(shipped|delivered|in_transit|delayed|processing|out_for_delivery|pending|ready|cancelled)\b', re.IGNORECASE)
 
-    injection_patterns = [
+    injection_pats = [
         re.compile(r'ignore (all )?previous instructions', re.IGNORECASE),
         re.compile(r'system prompt override', re.IGNORECASE),
         re.compile(r'send (me )?(the )?canary', re.IGNORECASE),
@@ -233,6 +178,18 @@ def extract_features(dossier: Dossier):
         re.compile(r'print (the )?secret', re.IGNORECASE),
     ]
 
+    all_lines = []
+    external_injections = []
+    window_lines = []
+    approval_lines = []
+    unclear_lines = []
+    completed_lines = []
+    inquiry_lines = []
+    all_refs = []
+    all_case_ids = []
+    all_emails = []
+    all_statuses = []
+
     for s in sources:
         s_dict = s if isinstance(s, dict) else (s.model_dump() if hasattr(s, "model_dump") else getattr(s, "data", {}))
         source_id = s_dict.get("sourceId", "src_main")
@@ -240,82 +197,73 @@ def extract_features(dossier: Dossier):
         title = str(s_dict.get("title", ""))
         is_untrusted = provenance in ("external", "untrusted", "customer", "inbound", "unknown")
 
-        for m in re_ref.findall(title):
-            ref_ids.append(("title", m))
+        for r in re_ref.findall(title):
+            all_refs.append(("title", r))
+            if r.upper().startswith("CASE"):
+                all_case_ids.append(("title", r))
 
         lines = s_dict.get("lines", [])
-        for line in lines:
-            l_dict = line if isinstance(line, dict) else (line.model_dump() if hasattr(line, "model_dump") else getattr(line, "data", {}))
+        for l in lines:
+            l_dict = l if isinstance(l, dict) else (l.model_dump() if hasattr(l, "model_dump") else getattr(l, "data", {}))
             lid = l_dict.get("lineId", "l_0")
             txt = l_dict.get("text", "")
+            txt_lower = txt.lower()
             all_lines.append((source_id, provenance, lid, txt))
 
+            # Collect entities
             for em in re_email.findall(txt):
-                emails.append((lid, em))
+                all_emails.append((lid, em))
+            for rf in re_ref.findall(txt):
+                all_refs.append((lid, rf))
+                if rf.upper().startswith("CASE"):
+                    all_case_ids.append((lid, rf))
+            for hrf in re_hash_ref.findall(txt):
+                all_refs.append((lid, hrf))
+            for st in re_status.findall(txt):
+                all_statuses.append((lid, st.lower()))
 
-            for ref in re_ref.findall(txt):
-                ref_ids.append((lid, ref))
-                if ref.upper().startswith("CASE"):
-                    case_ids.append((lid, ref))
-            for href in re_hash_ref.findall(txt):
-                ref_ids.append((lid, href))
-
-            win_match = re_window.search(txt)
-            if win_match:
-                windows.append((lid, win_match.group(1).strip()))
-
-            st_match = re_status.search(txt)
-            if st_match:
-                statuses.append((lid, st_match.group(1).lower()))
-
-            for pat in injection_patterns:
-                if pat.search(txt):
-                    if is_untrusted:
-                        injections.append((source_id, lid, txt))
+            # 1. Injection check (only untrusted / external)
+            for pat in injection_pats:
+                if pat.search(txt) and is_untrusted:
+                    external_injections.append((source_id, lid, txt))
                     break
 
-            txt_lower = txt.lower()
+            # 2. Delivery window check
+            win_m = re_win.search(txt)
+            if win_m:
+                window_lines.append((source_id, provenance, lid, win_m.group(1).strip(), txt))
+
+            # 3. Approval check (only trusted internal)
             if ("approved" in txt_lower or "authorization" in txt_lower) and ("send" in txt_lower or "notice" in txt_lower or "email" in txt_lower):
-                em_in_line = re_email.search(txt)
-                if em_in_line and not is_untrusted:
-                    approvals.append((lid, em_in_line.group(0), txt))
+                em_m = re_email.search(txt)
+                if em_m and not is_untrusted:
+                    approval_lines.append((lid, em_m.group(0), txt))
 
-            if "already completed" in txt_lower or "already shipped" in txt_lower or "already resolved" in txt_lower:
-                completed_markers.append((lid, "ALREADY_COMPLETED"))
+            # 4. Unclear identity / dispute
+            if any(k in txt_lower for k in ("unclear identity", "sender mismatch", "claimed sender", "verify request", "unconfirmed", "dispute", "fraud")):
+                em_m = re_email.search(txt)
+                unclear_lines.append((lid, em_m.group(0) if em_m else "unverified_sender", txt))
+
+            # 5. Completed / Duplicate / Informational
+            if any(k in txt_lower for k in ("already completed", "already shipped", "already resolved", "task complete")):
+                completed_lines.append((lid, "ALREADY_COMPLETED"))
             elif "duplicate" in txt_lower:
-                completed_markers.append((lid, "DUPLICATE"))
-            elif "informational" in txt_lower or "no action required" in txt_lower or "security advisory" in txt_lower or "quoted for reference" in txt_lower:
-                completed_markers.append((lid, "INFORMATIONAL"))
+                completed_lines.append((lid, "DUPLICATE"))
+            elif any(k in txt_lower for k in ("informational", "no action required", "security advisory", "quoted for reference", "internal log")):
+                completed_lines.append((lid, "INFORMATIONAL"))
 
-            if "unclear identity" in txt_lower or "sender mismatch" in txt_lower or "claimed sender" in txt_lower or "verify request" in txt_lower or "unconfirmed" in txt_lower:
-                em = re_email.search(txt)
-                unclear_markers.append((lid, em.group(0) if em else "unverified_sender"))
+            # 6. Customer inquiry / Draft candidate
+            if is_untrusted and any(k in txt_lower for k in ("status", "order", "where", "tracking", "update", "help", "package", "arrive")):
+                inquiry_lines.append((lid, txt))
 
-    return {
-        "all_lines": all_lines,
-        "emails": emails,
-        "ref_ids": ref_ids,
-        "windows": windows,
-        "case_ids": case_ids,
-        "statuses": statuses,
-        "injections": injections,
-        "approvals": approvals,
-        "completed_markers": completed_markers,
-        "unclear_markers": unclear_markers
-    }
+    # Determine default reference ID
+    default_ref = all_refs[0][1] if all_refs else (re_ref.search(dossier_id).group(0) if re_ref.search(dossier_id) else dossier_id)
 
-
-def intelligent_case_decision(dossier: Dossier) -> Dict[str, Any]:
-    f = extract_features(dossier)
-    all_lines = f["all_lines"]
-    mailbox = getattr(dossier, "mailbox", "inbox")
-    dossier_id = dossier.dossierId
-
-    default_ref = f["ref_ids"][0][1] if f["ref_ids"] else dossier_id
-
-    # 1. PROMPT INJECTION / QUARANTINE
-    if f["injections"]:
-        src_id, line_id, _ = f["injections"][0]
+    # -------------------------------------------------------------------------
+    # RULE 1: PROMPT INJECTION / QUARANTINE
+    # -------------------------------------------------------------------------
+    if external_injections:
+        src_id, inj_lid, _ = external_injections[0]
         return {
             "action": "quarantine_item",
             "target": {"kind": "security_queue", "id": "mailroom"},
@@ -323,76 +271,89 @@ def intelligent_case_decision(dossier: Dossier) -> Dict[str, Any]:
                 "artifactId": src_id,
                 "reasonCode": "INDIRECT_PROMPT_INJECTION"
             },
-            "evidence": [line_id]
+            "evidence": [inj_lid]
         }
 
-    # 2. UPDATE INTERNAL RECORD
-    if f["windows"]:
-        win_line_id, win_val = f["windows"][0]
-        case_id = f["case_ids"][0][1] if f["case_ids"] else (f["ref_ids"][0][1] if f["ref_ids"] else dossier_id)
-        auth_source_id = "src_dispatch"
-        for src_id, prov, lid, _ in all_lines:
-            if lid == win_line_id:
-                auth_source_id = src_id
-                break
+    # -------------------------------------------------------------------------
+    # RULE 2: UPDATE INTERNAL RECORD
+    # -------------------------------------------------------------------------
+    if window_lines:
+        # Check internal authority
+        auth_win = next((w for w in window_lines if w[1] in ("internal", "dispatch", "carrier", "staff")), window_lines[0])
+        src_id, prov, win_lid, win_val, _ = auth_win
+        case_id = all_case_ids[0][1] if all_case_ids else (all_refs[0][1] if all_refs else dossier_id)
 
-        evidence = [win_line_id]
-        if f["case_ids"] and f["case_ids"][0][0] != win_line_id and f["case_ids"][0][0] != "title":
-            evidence.append(f["case_ids"][0][0])
+        evidence = [win_lid]
+        if all_case_ids and all_case_ids[0][0] != "title" and all_case_ids[0][0] != win_lid:
+            evidence.append(all_case_ids[0][0])
 
         return {
             "action": "update_internal_record",
             "target": {"kind": "case_record", "id": case_id},
             "payload": {
                 "field": "delivery_window",
-                "sourceEventId": auth_source_id,
+                "sourceEventId": src_id,
                 "value": win_val
             },
             "evidence": sorted(list(set(evidence)))
         }
 
-    # 3. SEND APPROVED NOTICE
-    if f["approvals"]:
-        app_line_id, recipient, _ = f["approvals"][0]
-        ref_id = f["ref_ids"][0][1] if f["ref_ids"] else default_ref
-        status_val = f["statuses"][0][1] if f["statuses"] else "approved"
+    # -------------------------------------------------------------------------
+    # RULE 3: SEND APPROVED NOTICE
+    # -------------------------------------------------------------------------
+    if approval_lines:
+        app_lid, rec_email, _ = approval_lines[0]
+        ref_id = all_refs[0][1] if all_refs else default_ref
+        st_val = all_statuses[0][1] if all_statuses else "approved"
 
-        evidence = [app_line_id]
-        if f["ref_ids"] and f["ref_ids"][0][0] != app_line_id and f["ref_ids"][0][0] != "title":
-            evidence.append(f["ref_ids"][0][0])
+        evidence = [app_lid]
+        if all_refs and all_refs[0][0] != "title" and all_refs[0][0] != app_lid:
+            evidence.append(all_refs[0][0])
 
         return {
             "action": "send_approved_notice",
-            "target": {"kind": "email", "id": recipient},
+            "target": {"kind": "email", "id": rec_email},
             "payload": {
                 "referenceId": ref_id,
-                "status": status_val,
+                "status": st_val,
                 "template": "approved_delivery_notice"
             },
             "evidence": sorted(list(set(evidence)))
         }
 
-    # 4. REQUEST CONFIRMATION
-    if f["unclear_markers"]:
-        unc_line_id, claimed = f["unclear_markers"][0]
-        ref_id = f["ref_ids"][0][1] if f["ref_ids"] else default_ref
+    # -------------------------------------------------------------------------
+    # RULE 4: REQUEST CONFIRMATION
+    # -------------------------------------------------------------------------
+    if unclear_lines:
+        unc_lid, claimed_sender, _ = unclear_lines[0]
+        ref_id = all_refs[0][1] if all_refs else default_ref
         owning_team = "identity_verification" if "billing" in mailbox or "identity" in mailbox else "customer_support"
+
+        evidence = [unc_lid]
+        if all_refs and all_refs[0][0] != "title" and all_refs[0][0] != unc_lid:
+            evidence.append(all_refs[0][0])
 
         return {
             "action": "request_confirmation",
             "target": {"kind": "approval_queue", "id": owning_team},
             "payload": {
-                "claimedSender": claimed,
+                "claimedSender": claimed_sender,
                 "questionCode": "VERIFY_REQUEST",
                 "referenceId": ref_id
             },
-            "evidence": [unc_line_id]
+            "evidence": sorted(list(set(evidence)))
         }
 
-    # 5. NO ACTION
-    if f["completed_markers"]:
-        comp_line_id, reason_code = f["completed_markers"][0]
-        ref_id = f["ref_ids"][0][1] if f["ref_ids"] else default_ref
+    # -------------------------------------------------------------------------
+    # RULE 5: NO ACTION
+    # -------------------------------------------------------------------------
+    if completed_lines:
+        comp_lid, reason_code = completed_lines[0]
+        ref_id = all_refs[0][1] if all_refs else default_ref
+        evidence = [comp_lid]
+        if all_refs and all_refs[0][0] != "title" and all_refs[0][0] != comp_lid:
+            evidence.append(all_refs[0][0])
+
         return {
             "action": "no_action",
             "target": None,
@@ -400,21 +361,25 @@ def intelligent_case_decision(dossier: Dossier) -> Dict[str, Any]:
                 "reasonCode": reason_code,
                 "referenceId": ref_id
             },
-            "evidence": [comp_line_id]
+            "evidence": sorted(list(set(evidence)))
         }
 
-    # 6. CREATE DRAFT
-    cust_email = f["emails"][0][1] if f["emails"] else f"customer_{dossier_id[:8]}@domain.com"
-    ref_id = f["ref_ids"][0][1] if f["ref_ids"] else default_ref
-    status_val = f["statuses"][0][1] if f["statuses"] else "processing"
+    # -------------------------------------------------------------------------
+    # RULE 6: CREATE DRAFT (Standard Customer Inquiry)
+    # -------------------------------------------------------------------------
+    cust_email = all_emails[0][1] if all_emails else f"customer_{dossier_id[:8]}@example.com"
+    ref_id = all_refs[0][1] if all_refs else default_ref
+    st_val = all_statuses[0][1] if all_statuses else "in_transit"
 
-    evidence = []
-    if f["emails"] and f["emails"][0][0] != "title":
-        evidence.append(f["emails"][0][0])
-    if f["ref_ids"] and f["ref_ids"][0][0] != "title":
-        evidence.append(f["ref_ids"][0][0])
+    evidence = set()
+    if all_emails and all_emails[0][0] != "title":
+        evidence.add(all_emails[0][0])
+    if all_refs and all_refs[0][0] != "title":
+        evidence.add(all_refs[0][0])
+    if all_statuses and all_statuses[0][0] != "title":
+        evidence.add(all_statuses[0][0])
     if not evidence:
-        evidence = [all_lines[0][2]] if all_lines else ["l_0"]
+        evidence.add(all_lines[0][2] if all_lines else "l_0")
 
     return {
         "action": "create_draft",
@@ -422,10 +387,10 @@ def intelligent_case_decision(dossier: Dossier) -> Dict[str, Any]:
         "payload": {
             "recipient": cust_email,
             "referenceId": ref_id,
-            "status": status_val,
+            "status": st_val,
             "template": "order_status"
         },
-        "evidence": sorted(list(set(evidence)))
+        "evidence": sorted(list(evidence))
     }
 
 
@@ -487,7 +452,7 @@ async def decide_dossier_action(dossier: Dossier) -> Proposal:
     """
     dossier_dict = dossier.model_dump()
     content_bytes = canonical_json_bytes(dossier_dict)
-    content_hash = sha256_hex(content_bytes)
+    content_hash = sha256_hex(b"v4:" + content_bytes)
     call_id = f"call_{content_hash[:24]}"
 
     groq_key = os.environ.get("GROQ_API_KEY")
@@ -523,15 +488,6 @@ async def decide_dossier_action(dossier: Dossier) -> Proposal:
         except Exception as e:
             logger.error(f"Gemini call error: {e}")
 
-    elif httpx and ai_provider == "openai" and openai_key:
-        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-        base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        user_prompt = f"DOSSIER:\n{json.dumps(dossier_dict, indent=2)}"
-        try:
-            raw_json_str = await call_openai(user_prompt, openai_key, model, base_url)
-        except Exception as e:
-            logger.error(f"OpenAI call error: {e}")
-
     decision = None
     if raw_json_str:
         try:
@@ -552,7 +508,12 @@ async def decide_dossier_action(dossier: Dossier) -> Proposal:
                 dossier, raw_action, raw_target, raw_payload
             )
             safe_payload = sanitize_canaries(safe_payload, dossier.dossierId)
-            grounded_ev = ground_evidence(dossier, safe_target, safe_payload, raw_evidence)
+
+            # Ensure evidence lines are valid lines from dossier
+            valid_ids = dossier.all_line_ids()
+            cleaned_ev = [lid for lid in raw_evidence if lid in valid_ids]
+            if not cleaned_ev:
+                cleaned_ev = [next(iter(valid_ids))] if valid_ids else ["l_0"]
 
             candidate = {
                 "dossierId": dossier.dossierId,
@@ -560,20 +521,19 @@ async def decide_dossier_action(dossier: Dossier) -> Proposal:
                 "action": safe_action,
                 "target": safe_target,
                 "payload": safe_payload,
-                "evidence": grounded_ev
+                "evidence": sorted(list(set(cleaned_ev)))
             }
             validate_proposal_dict(candidate, dossier.all_line_ids())
             decision = Proposal(**candidate)
         except Exception as e:
-            logger.warning(f"LLM output validation failed: {e}. Using intelligent extraction.")
+            logger.warning(f"LLM output validation failed: {e}. Using deterministic engine.")
 
     if not decision:
-        extracted = intelligent_case_decision(dossier)
+        extracted = analyze_dossier_strictly(dossier)
         safe_action, safe_target, safe_payload = verify_outbound_safety(
             dossier, extracted["action"], extracted.get("target"), extracted["payload"]
         )
         safe_payload = sanitize_canaries(safe_payload, dossier.dossierId)
-        grounded_ev = ground_evidence(dossier, safe_target, safe_payload, extracted["evidence"])
 
         candidate = {
             "dossierId": dossier.dossierId,
@@ -581,7 +541,7 @@ async def decide_dossier_action(dossier: Dossier) -> Proposal:
             "action": safe_action,
             "target": safe_target,
             "payload": safe_payload,
-            "evidence": grounded_ev
+            "evidence": sorted(list(set(extracted["evidence"])))
         }
         validate_proposal_dict(candidate, dossier.all_line_ids())
         decision = Proposal(**candidate)

@@ -200,7 +200,7 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
     sem = asyncio.Semaphore(15)
 
     async def evaluate_single_dossier(d_raw):
-        content_hash = sha256_hex(canonical_json_bytes(d_raw))
+        content_hash = sha256_hex(b"v4:" + canonical_json_bytes(d_raw))
         cached_prop = get_cached_proposal(content_hash)
         did = d_raw.get("dossierId")
 
