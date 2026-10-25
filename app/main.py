@@ -88,7 +88,7 @@ def diagnostic_status():
         "status": "ok",
         "ai_provider": os.environ.get("AI_PROVIDER", "unset"),
         "groq_key_configured": bool(groq_key and len(groq_key) > 5),
-        "groq_model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        "groq_model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
         "gemini_key_configured": bool(gemini_key and len(gemini_key) > 5),
         "gemini_model": os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
         "openai_key_configured": bool(openai_key and len(openai_key) > 5)

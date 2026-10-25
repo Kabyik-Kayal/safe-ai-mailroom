@@ -416,7 +416,7 @@ async def decide_dossier_action(dossier: Dossier) -> Proposal:
 
     raw_json_str = None
     if httpx and ai_provider == "groq" and groq_key:
-        model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+        model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
         base_url = "https://api.groq.com/openai/v1"
         user_prompt = f"DOSSIER:\n{json.dumps(dossier_dict, indent=2)}"
         try:
